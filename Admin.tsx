@@ -5,13 +5,23 @@ import { formatPaise } from "../lib/config";
 
 type Setting = { key: string; value: string };
 
+type PendingTopup = {
+  id: string;
+  user_id: string;
+  amount_paise: number;
+  created_at: string;
+  user_email: string | null;
+};
+
 export default function Admin() {
   const [settings, setSettings] = useState<Setting[]>([]);
   const [failedJobs, setFailedJobs] = useState<number | null>(null);
   const [pendingPayments, setPendingPayments] = useState<number | null>(null);
+  const [topups, setTopups] = useState<PendingTopup[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [approving, setApproving] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -34,9 +44,47 @@ export default function Admin() {
         .select("id", { count: "exact", head: true })
         .eq("status", "pending");
       setPendingPayments(pp ?? 0);
+      const { data: tp } = await supabase
+        .from("payments")
+        .select("id,user_id,amount_paise,created_at")
+        .eq("status", "pending")
+        .eq("provider", "manual")
+        .order("created_at", { ascending: true });
+      const withEmails: PendingTopup[] = await Promise.all(
+        (tp ?? []).map(async (p) => {
+          const { data: prof } = await supabase
+            .from("profiles")
+            .select("email")
+            .eq("id", p.user_id)
+            .single();
+          return { ...p, user_email: prof?.email ?? null };
+        })
+      );
+      setTopups(withEmails);
       setLoading(false);
     })();
   }, []);
+
+  const approveTopup = async (t: PendingTopup) => {
+    setApproving(t.id);
+    setMsg(null);
+    try {
+      const { error } = await supabase.rpc("admin_credit_wallet", {
+        p_user_id: t.user_id,
+        p_amount_paise: t.amount_paise,
+        p_payment_id: t.id,
+        p_idempotency_key: `topup-${t.id}`,
+      });
+      if (error) throw error;
+      setTopups((prev) => prev.filter((x) => x.id !== t.id));
+      setPendingPayments((n) => (n !== null ? n - 1 : n));
+      setMsg(`Credited ${formatPaise(t.amount_paise)} to ${t.user_email ?? t.user_id}.`);
+    } catch (e) {
+      setMsg(e instanceof Error ? `Approve failed: ${e.message}` : "Approve failed.");
+    } finally {
+      setApproving(null);
+    }
+  };
 
   const saveSettings = async () => {
     setSaving(true);
@@ -90,6 +138,37 @@ export default function Admin() {
               </div>
             </div>
           </div>
+
+          <h2 className="mt-8 text-lg font-bold">Pending top-up requests</h2>
+          {topups.length === 0 ? (
+            <p className="mt-2 text-sm text-slate-500">No pending requests.</p>
+          ) : (
+            <ul className="mt-3 space-y-2">
+              {topups.map((t) => (
+                <li
+                  key={t.id}
+                  className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900 px-4 py-3"
+                >
+                  <div>
+                    <div className="font-semibold">
+                      {formatPaise(t.amount_paise)}
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      {t.user_email ?? t.user_id} ·{" "}
+                      {new Date(t.created_at).toLocaleString()}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => approveTopup(t)}
+                    disabled={approving === t.id}
+                    className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-bold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
+                  >
+                    {approving === t.id ? "Approving…" : "Approve & credit"}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
 
           <h2 className="mt-8 text-lg font-bold">Prices &amp; limits</h2>
           <div className="mt-3 rounded-2xl border border-slate-800 bg-slate-900 p-5 space-y-3">
